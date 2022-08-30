@@ -13,6 +13,8 @@
 #include <time.h>
 #include <assert.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <errno.h>
 
 #define OUTFILE stdout
 #define NELEMS(X) (sizeof(X)/sizeof(X[0]))
@@ -108,11 +110,13 @@ clear_screen(FILE * fp)
     fprintf(fp, "%c%c", 27, 99);
 }
 
+#if 0
 static int
 guy_is_here(size_t r, size_t c)
 {
     return guy_row+1 == r && guy_col == c;
 }
+#endif
 
 static int
 on_path_to_exit(size_t r, size_t c)
@@ -219,6 +223,7 @@ get_moves(size_t r, size_t c)
     return moves;
 }
 
+#if 0
 static int
 count_moves(int moves)
 {
@@ -229,6 +234,7 @@ count_moves(int moves)
     nmoves += (moves >> 3) & 1;
     return nmoves;
 }
+#endif
 
 static int
 pick_random_move(int moves)
@@ -376,6 +382,7 @@ inverse_move(int move)
         case 0: return 0;
         default: assert(0);
     }
+    return 0;
 }
 
 static void
@@ -383,6 +390,97 @@ delay(int ms)
 {
     if (isatty(fileno(OUTFILE)))
         nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec=ms*1000000L}, NULL);
+}
+
+typedef enum {UP=0, LEFT=1, RIGHT=2, DOWN=3, NONE} Dir;
+typedef struct {Dir dir; bool taken;} Move;
+
+static Dir
+inverse_dir(Dir dir)
+{
+    return 3-dir;
+}
+
+static size_t
+get_avail_moves(int maze[NR][NC], Location curr, Move avail_moves[4])
+{
+    size_t num_avail = 0;
+    if ((curr.row > 0) && !(maze[curr.row][curr.col] & TT))
+        avail_moves[num_avail++] = (Move){.dir=UP};
+    if ((curr.col > 0) && !(maze[curr.row][curr.col] & LL))
+        avail_moves[num_avail++] = (Move){.dir=LEFT};
+    if ((curr.row < NR-1) && !(maze[curr.row+1][curr.col] & TT))
+        avail_moves[num_avail++] = (Move){.dir=DOWN};
+    if ((curr.col < NC-1) && !(maze[curr.row][curr.col+1] & LL))
+        avail_moves[num_avail++] = (Move){.dir=RIGHT};
+    return num_avail;
+}
+
+static Location
+apply_move_v3(Move move, Location curr)
+{
+    switch (move.dir) {
+        case UP: curr.row--; break;
+        case DOWN: curr.row++; break;
+        case LEFT: curr.col--; break;
+        case RIGHT: curr.col++; break;
+        default: break;
+    }
+    return curr;
+}
+
+static Location
+undo_move_v3(Move move, Location curr)
+{
+    switch (move.dir) {
+        case UP: curr.row++; break;
+        case DOWN: curr.row--; break;
+        case LEFT: curr.col++; break;
+        case RIGHT: curr.col--; break;
+        default: break;
+    }
+    return curr;
+}
+
+static bool
+solve_v3(int maze[NR][NC], Location start, Location end)
+{
+    static Move move_stack[NR*NC*3];
+    size_t move_stack_len = 0;
+
+    static bool been_at[NR][NC];
+    memset(been_at, 0, sizeof(been_at));
+
+    Location curr = {.row=start.row, .col=start.col};
+    Move most_recent_move = {.dir=NONE};
+    while (1) {
+        been_at[curr.row][curr.col] = true;
+        Move new_avail_moves[4];
+        size_t num_avail = get_avail_moves(maze, curr, new_avail_moves);
+        for (size_t i = 0; i < num_avail; i++) {
+            if (new_avail_moves[i].dir == inverse_dir(most_recent_move.dir))
+                continue;
+            move_stack[move_stack_len++] = new_avail_moves[i];
+        }
+        if (most_recent_move.dir != NONE)
+            num_avail--;
+        do {
+            if (num_avail == 0) {
+                do {
+                    if (move_stack_len <= 1)
+                        return false;
+                    curr = undo_move_v3(move_stack[--move_stack_len], curr);
+                } while (move_stack[move_stack_len-1].taken);
+            }
+            move_stack[move_stack_len-1].taken = true;
+            most_recent_move = move_stack[move_stack_len-1];
+            curr = apply_move_v3(most_recent_move, curr);
+			num_avail = 0;
+        } while (been_at[curr.row][curr.col]);
+        if ((curr.row == end.row) && (curr.col == end.col))
+            break;
+    }
+    return true;
 }
 
 static int
@@ -394,7 +492,7 @@ solve_no_goto()
         int moves = get_moves(guy_row, guy_col) & ~inverse_move(prev_move);
         push_moves_to_stack(moves);
         do {
-            if (count_moves(moves) == 0) {
+            if (moves == 0) {
                 do {
                     if (move_stack_len <= 1)
                         return 0;
@@ -418,11 +516,11 @@ solve()
         remember_current_location();
         int moves = get_moves(guy_row, guy_col) & ~inverse_move(prev_move);
         push_moves_to_stack(moves);
-        if (count_moves(moves) == 0) {
+        if (moves == 0) {
 undo_another:
             if (move_stack_len <= 1)
                 return 0;
-            prev_move = undo_and_pop_top_move();
+            undo_and_pop_top_move();
             if (top_move_is_applied())
                 goto undo_another;
         }
@@ -486,7 +584,7 @@ create_path_to_exit()
         remember_current_location();
         int moves = moves_inside_maze(guy_row, guy_col) & ~inverse_move(prev_move);
         push_moves_to_stack_shuffled(moves);
-        if (count_moves(moves) == 0) {
+        if (moves == 0) {
 undo_another:
             prev_move = undo_and_pop_top_move();
             if (top_move_is_applied())
@@ -556,18 +654,38 @@ init_maze()
     maze[0][NC-1] &= ~TT; // exit
 }
 
-#define NMAZES 10000
-int main()
+//#define NMAZES 10000
+#define NMAZES 3
+int main(int argc, char * argv[])
 {
+    long solver_number = 1;
+    if (argc > 1) {
+        errno = 0;
+        solver_number = strtol(argv[1], NULL, 10);
+        if (errno) {
+            perror("strtol");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
     DECLARE_TIMER(1);
     START_TIMER(1);
     int mazes_found = 0;
     for (maze_num = 0; maze_num < NMAZES; maze_num++) {
         init_maze();
-        //print_maze(OUTFILE);
-        //delay(900);
-        //return 0;
-        if (solve()) {
+        bool solution_found = false;
+        if (solver_number == 1) {
+            solution_found = solve();
+        } else if (solver_number == 2) {
+            solution_found = solve_no_goto();
+        } else if (solver_number == 3) {
+            solution_found = solve_v3(
+                maze,
+                (Location){.row=START_ROW, .col=START_COL},
+                (Location){.row=EXIT_ROW, .col=EXIT_COL}
+            );
+        }
+        if (solution_found) {
             print_maze(OUTFILE);
             print_moves(OUTFILE);
             mazes_found++;
@@ -583,7 +701,7 @@ int main()
     }
     STOP_TIMER(1);
     printf("mazes found: %d/%d\n", mazes_found, NMAZES);
-    printf("time: %ldms\n", GET_ELAPSED_MS(1));
+    printf("time: %ldus\n", GET_ELAPSED_US(1));
 
 #if 0
     for (guy_row = 0; guy_row < NR; guy_row++) {
